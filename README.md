@@ -5,12 +5,11 @@ Demo program
 
 - To see a richer, README-style walkthrough of the main use cases and results, run:
   - `go run ./cmd/demo`
-- The demo prints several small, realistic scenarios and their space savings compared to fixed-size floats/ints, for example:
-  - Sparse pixel coordinates where only block-level precision (e.g. ~8px) is needed, using varfloats instead of full `float64`s, including a few example block-quantized positions.
-  - Percentages/probabilities in `[0,1]` with many exact zeros, going from ~80kB of fixed `float64`s down to ~15kB using either varints or varfloats (~5× smaller).
-  - Time-series integer deltas where step-to-step changes are small, going from ~80kB of fixed `int64`s down to ~10kB with varints and ~21kB with varfloats.
-  - Lossy integer buckets using pure integer math for quantization (e.g. counts rounded to 10-sized buckets) encoded as bounded ints via varfloats.
-  - 3D vectors stored with limited mantissa precision, trading a small relative error in vector length for ~2–3× smaller encodings.
+- The demo prints four realistic scenarios and their space savings compared to fixed-size floats/ints, for example:
+  - Large float64 game-world position vectors where (by premise) users usually explore within a +/-2k x +/-2k region (~4k x 4k total), so only block-level precision is needed there, using varfloats over block-quantized integers instead of full `float64`s.
+  - 3D vectors stored with limited mantissa precision, trading a controlled relative error in vector length for ~2–3× smaller encodings.
+  - Telemetry-style bounded floats (e.g. temperatures, loads) with small tolerated absolute error, using a mantissa chosen from an error budget.
+  - Time-series integer deltas where step-to-step changes are small, encoding deltas as bounded varfloats instead of full `int64`s.
 
 Overview
 --------

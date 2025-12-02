@@ -1,6 +1,7 @@
 package varfloat
 
 import (
+	"bufio"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -44,7 +45,7 @@ func SetMantissaBits(bits int) error {
 //
 // Roughly, the relative quantization step is ~1/(2^bits). This helper chooses:
 //
-//   bits ≈ ceil(log2(1 / maxRelErr))
+//	bits ≈ ceil(log2(1 / maxRelErr))
 //
 // and clamps the result into [0, 52]. maxRelErr must be in (0, 1).
 func BitsForMaxRelError(maxRelErr float64) (int, error) {
@@ -58,6 +59,287 @@ func BitsForMaxRelError(maxRelErr float64) (int, error) {
 		bits = 52
 	}
 	return bits, nil
+}
+
+// MaxRelErrorForBits returns an approximate maximum relative error for a given
+// mantissa bit count. It is roughly the inverse of BitsForMaxRelError:
+//
+//	maxRelErr ≈ 1 / (2^bits)
+//
+// The result is always positive; for bits outside [0,52] it clamps as if the
+// bits had first been clamped into that range.
+func MaxRelErrorForBits(bits int) float64 {
+	if bits < 0 {
+		bits = 0
+	} else if bits > 52 {
+		bits = 52
+	}
+	// The quantization step is on the order of 2^-bits.
+	return math.Pow(2, -float64(bits))
+}
+
+// QuantizationStep returns the approximate quantization step size for a given
+// mantissa bit count, in units of "fractions of 1.0". For example, with bits=10
+// the step is roughly 1/1024.
+//
+// This is just an alias for MaxRelErrorForBits, provided for clearer naming in
+// some contexts.
+func QuantizationStep(bits int) float64 {
+	return MaxRelErrorForBits(bits)
+}
+
+// QuantizeIntDown quantizes v down to the nearest multiple of step using
+// integer division, i.e. it returns floor(v/step)*step for non-negative v.
+// This is useful when you only care about counts or buckets of size step and
+// want a simple lossy representation.
+//
+// If step <= 0, QuantizeIntDown returns v unchanged.
+func QuantizeIntDown(v, step int64) int64 {
+	if step <= 0 {
+		return v
+	}
+	return (v / step) * step
+}
+
+// MaxIntQuantizationError returns the maximum absolute error introduced by
+// QuantizeIntDown for non-negative values when using the given step size.
+// Since QuantizeIntDown always rounds down to a multiple of step, the error
+// is in [0, step) and this helper simply returns step-1 for convenience.
+//
+// If step <= 0, it returns 0.
+func MaxIntQuantizationError(step int64) int64 {
+	if step <= 0 {
+		return 0
+	}
+	return step - 1
+}
+
+// FloatEncoder is a convenience wrapper that holds a chosen mantissa precision
+// and exposes helpers for encoding single floats or slices.
+type FloatEncoder struct {
+	Bits int
+}
+
+// NewFloatEncoder constructs a FloatEncoder from a desired maximum relative
+// error. It simply calls BitsForMaxRelError and stores the chosen mantissa bit
+// count.
+func NewFloatEncoder(maxRelErr float64) (*FloatEncoder, error) {
+	bits, err := BitsForMaxRelError(maxRelErr)
+	if err != nil {
+		return nil, err
+	}
+	return &FloatEncoder{Bits: bits}, nil
+}
+
+// Encode encodes a single float64 using the encoder's mantissa bits.
+func (e *FloatEncoder) Encode(v float64) ([]byte, error) {
+	return EncodeFloat(v, e.Bits)
+}
+
+// EncodeSlice encodes a slice of float64 values using the encoder's mantissa
+// bits.
+func (e *FloatEncoder) EncodeSlice(values []float64) ([]byte, error) {
+	return EncodeFloats(values, e.Bits)
+}
+
+// Vec3Encoder is a convenience wrapper that holds a chosen mantissa precision
+// and exposes helpers for encoding Vec3 values and slices.
+type Vec3Encoder struct {
+	Bits int
+}
+
+// NewVec3Encoder constructs a Vec3Encoder from a desired maximum relative
+// error on vector magnitudes. It uses BitsForMaxRelError under the hood.
+func NewVec3Encoder(maxRelErr float64) (*Vec3Encoder, error) {
+	bits, err := BitsForMaxRelError(maxRelErr)
+	if err != nil {
+		return nil, err
+	}
+	return &Vec3Encoder{Bits: bits}, nil
+}
+
+// Encode encodes a single Vec3 using the encoder's mantissa bits.
+func (e *Vec3Encoder) Encode(v Vec3) ([]byte, error) {
+	return EncodeVec3(v, e.Bits)
+}
+
+// EncodeSlice encodes a slice of Vec3 values using the encoder's mantissa
+// bits.
+func (e *Vec3Encoder) EncodeSlice(vs []Vec3) ([]byte, error) {
+	return EncodeVec3Slice(vs, e.Bits)
+}
+
+// FloatStreamEncoder writes chunks of float64 slices to an io.Writer. Each chunk
+// is encoded as:
+//
+//	[1-byte mantissa bits][uvarint byteLen][EncodeFloats payload...]
+//
+// where EncodeFloats payload is the usual length-prefixed varfloat encoding for
+// the provided slice.
+type FloatStreamEncoder struct {
+	w io.Writer
+}
+
+// NewFloatStreamEncoder creates a FloatStreamEncoder that writes to w.
+func NewFloatStreamEncoder(w io.Writer) *FloatStreamEncoder {
+	return &FloatStreamEncoder{w: w}
+}
+
+// WriteChunk encodes a slice of float64 values with the given mantissa bits and
+// writes it as a self-contained chunk to the underlying writer.
+func (e *FloatStreamEncoder) WriteChunk(values []float64, bits int) error {
+	if bits < 0 || bits > 52 {
+		return errors.New("varfloat: mantissa bits must be between 0 and 52")
+	}
+
+	payload, err := EncodeFloats(values, bits)
+	if err != nil {
+		return err
+	}
+
+	var lenBuf [10]byte
+	byteLen := uint64(len(payload))
+	nLen := binary.PutUvarint(lenBuf[:], byteLen)
+
+	header := []byte{byte(bits)}
+	header = append(header, lenBuf[:nLen]...)
+
+	if _, err := e.w.Write(header); err != nil {
+		return err
+	}
+	if _, err := e.w.Write(payload); err != nil {
+		return err
+	}
+	return nil
+}
+
+// FloatStreamDecoder reads chunks of float64 slices from an io.Reader that were
+// written by FloatStreamEncoder.
+type FloatStreamDecoder struct {
+	r *bufio.Reader
+}
+
+// NewFloatStreamDecoder creates a FloatStreamDecoder that reads from r.
+func NewFloatStreamDecoder(r io.Reader) *FloatStreamDecoder {
+	return &FloatStreamDecoder{r: bufio.NewReader(r)}
+}
+
+// ReadChunk reads and decodes the next chunk from the stream, returning the
+// decoded slice, the mantissa bits that were used to encode it, and an error.
+// On EOF without any bytes read, it returns (nil, 0, io.EOF).
+func (d *FloatStreamDecoder) ReadChunk() ([]float64, int, error) {
+	bitsByte, err := d.r.ReadByte()
+	if err != nil {
+		return nil, 0, err
+	}
+	bits := int(bitsByte)
+	if bits < 0 || bits > 52 {
+		return nil, 0, errors.New("varfloat: invalid mantissa bits in stream header")
+	}
+
+	byteLen, err := binary.ReadUvarint(d.r)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	if byteLen == 0 {
+		return nil, bits, nil
+	}
+
+	buf := make([]byte, byteLen)
+	if _, err := io.ReadFull(d.r, buf); err != nil {
+		return nil, 0, err
+	}
+
+	values, _, err := DecodeFloats(buf, bits)
+	if err != nil {
+		return nil, 0, err
+	}
+	return values, bits, nil
+}
+
+// Vec3StreamEncoder writes chunks of Vec3 slices to an io.Writer using the same
+// chunk format as FloatStreamEncoder but with EncodeVec3Slice payloads.
+type Vec3StreamEncoder struct {
+	w io.Writer
+}
+
+// NewVec3StreamEncoder creates a Vec3StreamEncoder that writes to w.
+func NewVec3StreamEncoder(w io.Writer) *Vec3StreamEncoder {
+	return &Vec3StreamEncoder{w: w}
+}
+
+// WriteChunk encodes a slice of Vec3 values with the given mantissa bits and
+// writes it as a self-contained chunk to the underlying writer.
+func (e *Vec3StreamEncoder) WriteChunk(vs []Vec3, bits int) error {
+	if bits < 0 || bits > 52 {
+		return errors.New("varfloat: mantissa bits must be between 0 and 52")
+	}
+
+	payload, err := EncodeVec3Slice(vs, bits)
+	if err != nil {
+		return err
+	}
+
+	var lenBuf [10]byte
+	byteLen := uint64(len(payload))
+	nLen := binary.PutUvarint(lenBuf[:], byteLen)
+
+	header := []byte{byte(bits)}
+	header = append(header, lenBuf[:nLen]...)
+
+	if _, err := e.w.Write(header); err != nil {
+		return err
+	}
+	if _, err := e.w.Write(payload); err != nil {
+		return err
+	}
+	return nil
+}
+
+// Vec3StreamDecoder reads chunks of Vec3 slices from an io.Reader that were
+// written by Vec3StreamEncoder.
+type Vec3StreamDecoder struct {
+	r *bufio.Reader
+}
+
+// NewVec3StreamDecoder creates a Vec3StreamDecoder that reads from r.
+func NewVec3StreamDecoder(r io.Reader) *Vec3StreamDecoder {
+	return &Vec3StreamDecoder{r: bufio.NewReader(r)}
+}
+
+// ReadChunk reads and decodes the next Vec3 slice chunk from the stream. It
+// returns the decoded vectors, the mantissa bits that were used to encode them,
+// and an error. On EOF without any bytes read, it returns (nil, 0, io.EOF).
+func (d *Vec3StreamDecoder) ReadChunk() ([]Vec3, int, error) {
+	bitsByte, err := d.r.ReadByte()
+	if err != nil {
+		return nil, 0, err
+	}
+	bits := int(bitsByte)
+	if bits < 0 || bits > 52 {
+		return nil, 0, errors.New("varfloat: invalid mantissa bits in stream header")
+	}
+
+	byteLen, err := binary.ReadUvarint(d.r)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	if byteLen == 0 {
+		return nil, bits, nil
+	}
+
+	buf := make([]byte, byteLen)
+	if _, err := io.ReadFull(d.r, buf); err != nil {
+		return nil, 0, err
+	}
+
+	vs, _, err := DecodeVec3Slice(buf, bits)
+	if err != nil {
+		return nil, 0, err
+	}
+	return vs, bits, nil
 }
 
 // Append encodes v as a varfloat using DefaultConfig and appends it to dst.
@@ -116,6 +398,25 @@ type Vec3 struct {
 	X, Y, Z float64
 }
 
+// Vec3Length returns the Euclidean length of v.
+func Vec3Length(v Vec3) float64 {
+	return math.Sqrt(v.X*v.X + v.Y*v.Y + v.Z*v.Z)
+}
+
+// Vec3Normalize returns a normalized copy of v. If v has zero length, it
+// returns the zero vector.
+func Vec3Normalize(v Vec3) Vec3 {
+	n := Vec3Length(v)
+	if n == 0 {
+		return Vec3{}
+	}
+	return Vec3{
+		X: v.X / n,
+		Y: v.Y / n,
+		Z: v.Z / n,
+	}
+}
+
 // EncodeVec3 encodes a single 3D vector using the given mantissa bit
 // precision. It is a small convenience wrapper around EncodeFloats.
 func EncodeVec3(v Vec3, bits int) ([]byte, error) {
@@ -169,6 +470,138 @@ func DecodeVec3Slice(b []byte, bits int) ([]Vec3, int, error) {
 		})
 	}
 	return out, n, nil
+}
+
+// EncodeFloatsWithMantissa encodes a slice of float64 values with a 1-byte
+// mantissa-bit header followed by the normal EncodeFloats payload. This makes
+// it possible for a decoder to recover the mantissa bits from the stream.
+func EncodeFloatsWithMantissa(values []float64, bits int) ([]byte, error) {
+	if bits < 0 || bits > 52 {
+		return nil, errors.New("varfloat: mantissa bits must be between 0 and 52")
+	}
+	payload, err := EncodeFloats(values, bits)
+	if err != nil {
+		return nil, err
+	}
+	// Prepend a single header byte with the mantissa bit count.
+	out := make([]byte, 0, 1+len(payload))
+	out = append(out, byte(bits))
+	out = append(out, payload...)
+	return out, nil
+}
+
+// DecodeFloatsWithMantissa decodes a slice of float64 values that was encoded
+// with EncodeFloatsWithMantissa. It returns the decoded values, the mantissa
+// bits recovered from the header, and the number of bytes consumed.
+func DecodeFloatsWithMantissa(b []byte) ([]float64, int, int, error) {
+	if len(b) == 0 {
+		return nil, 0, 0, errors.New("varfloat: empty buffer for DecodeFloatsWithMantissa")
+	}
+	bits := int(b[0])
+	if bits < 0 || bits > 52 {
+		return nil, 0, 0, errors.New("varfloat: invalid mantissa bits in header")
+	}
+	values, n, err := DecodeFloats(b[1:], bits)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	return values, bits, n + 1, nil
+}
+
+// EncodeVec3SliceWithMantissa encodes a slice of Vec3 values with a 1-byte
+// mantissa-bit header followed by the normal EncodeVec3Slice payload.
+func EncodeVec3SliceWithMantissa(vs []Vec3, bits int) ([]byte, error) {
+	if bits < 0 || bits > 52 {
+		return nil, errors.New("varfloat: mantissa bits must be between 0 and 52")
+	}
+	payload, err := EncodeVec3Slice(vs, bits)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]byte, 0, 1+len(payload))
+	out = append(out, byte(bits))
+	out = append(out, payload...)
+	return out, nil
+}
+
+// DecodeVec3SliceWithMantissa decodes a slice of Vec3 values that was encoded
+// with EncodeVec3SliceWithMantissa. It returns the decoded vectors, the
+// mantissa bits recovered from the header, and the number of bytes consumed.
+func DecodeVec3SliceWithMantissa(b []byte) ([]Vec3, int, int, error) {
+	if len(b) == 0 {
+		return nil, 0, 0, errors.New("varfloat: empty buffer for DecodeVec3SliceWithMantissa")
+	}
+	bits := int(b[0])
+	if bits < 0 || bits > 52 {
+		return nil, 0, 0, errors.New("varfloat: invalid mantissa bits in header")
+	}
+	vs, n, err := DecodeVec3Slice(b[1:], bits)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	return vs, bits, n + 1, nil
+}
+
+// EncodeIntsBoundedSlice encodes a slice of integers known to lie in [min,max]
+// with a 1-byte mantissa-bit header, followed by a length prefix and the
+// bounded-int payload. This is similar in spirit to EncodeFloatsWithMantissa
+// but for bounded integers.
+func EncodeIntsBoundedSlice(values []int64, min, max int64, bits int) ([]byte, error) {
+	if bits < 0 || bits > 52 {
+		return nil, errors.New("varfloat: mantissa bits must be between 0 and 52")
+	}
+
+	// Start with header byte for mantissa bits.
+	out := make([]byte, 0, 1+10+len(values))
+	out = append(out, byte(bits))
+
+	// Length prefix for the slice.
+	var buf [10]byte
+	n := binary.PutUvarint(buf[:], uint64(len(values)))
+	out = append(out, buf[:n]...)
+
+	// Encode each value as a bounded int using the provided bits.
+	for _, v := range values {
+		var err error
+		out, err = AppendIntBounded(out, v, min, max, bits)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return out, nil
+}
+
+// DecodeIntsBoundedSlice decodes a slice of integers that was encoded with
+// EncodeIntsBoundedSlice. It returns the decoded values, the mantissa bits
+// recovered from the header, and the number of bytes consumed.
+func DecodeIntsBoundedSlice(b []byte, min, max int64) ([]int64, int, int, error) {
+	if len(b) == 0 {
+		return nil, 0, 0, errors.New("varfloat: empty buffer for DecodeIntsBoundedSlice")
+	}
+	bits := int(b[0])
+	if bits < 0 || bits > 52 {
+		return nil, 0, 0, errors.New("varfloat: invalid mantissa bits in header")
+	}
+
+	// Read length prefix.
+	length, nLen := binary.Uvarint(b[1:])
+	if nLen <= 0 {
+		return nil, 0, 0, errors.New("varfloat: failed to decode length for ints slice")
+	}
+
+	values := make([]int64, 0, length)
+	offset := 1 + nLen
+	for i := uint64(0); i < length; i++ {
+		v, consumed, err := ConsumeIntBounded(b[offset:], min, max, bits)
+		if err != nil {
+			return nil, 0, 0, err
+		}
+		values = append(values, v)
+		offset += consumed
+	}
+
+	return values, bits, offset, nil
 }
 
 // Consume decodes a varfloat from the beginning of b using DefaultConfig.
@@ -391,7 +824,8 @@ func ConsumeIntBounded(b []byte, min, max int64, bits int) (int64, int, error) {
 //
 // The heuristic aims to provide enough precision over the given range without
 // forcing callers to think in terms of mantissa bits:
-//   bits ≈ ceil(log2(max-min+1)), clamped to [0, 52].
+//
+//	bits ≈ ceil(log2(max-min+1)), clamped to [0, 52].
 func AppendIntAuto(dst []byte, n, min, max int64) ([]byte, error) {
 	if min > max {
 		return nil, errors.New("varfloat: min must be <= max")
@@ -459,7 +893,7 @@ func autoBitsForWidth(width uint64) int {
 	steps := width + 1
 	// ceil(log2(steps))
 	bits := 0
-	for (uint64(1) << bits) < steps && bits < 52 {
+	for (uint64(1)<<bits) < steps && bits < 52 {
 		bits++
 	}
 	return bits
@@ -470,7 +904,7 @@ func autoBitsForWidth(width uint64) int {
 //
 // It uses the same heuristic as AppendIntAuto:
 //
-//   bits ≈ ceil(log2(max-min+1)), clamped to [0, 52].
+//	bits ≈ ceil(log2(max-min+1)), clamped to [0, 52].
 func BitsForIntRange(min, max int64) (int, error) {
 	if min > max {
 		return 0, errors.New("varfloat: min must be <= max")
@@ -486,10 +920,12 @@ func BitsForIntRange(min, max int64) (int, error) {
 // The idea:
 //
 //   - Let rangeWidth = max-min.
+//
 //   - The quantization step size is on the order of rangeWidth / 2^bits.
+//
 //   - To keep the absolute error <= maxAbsErr, we choose:
 //
-//       bits ≈ ceil(log2(rangeWidth / maxAbsErr)), clamped to [0, 52].
+//     bits ≈ ceil(log2(rangeWidth / maxAbsErr)), clamped to [0, 52].
 //
 // maxAbsErr must be > 0. If maxAbsErr >= rangeWidth, this returns 0.
 func BitsForIntMaxError(min, max, maxAbsErr int64) (int, error) {
