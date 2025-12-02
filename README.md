@@ -37,6 +37,12 @@ Core integer APIs:
   `ConsumeIntAuto(b []byte, min, max int64) (int64, int, error)`  
   Same as above, but the mantissa bits are chosen automatically from the bounds.
 
+Lossy integer helpers:
+
+- `EncodeIntLossy(dst []byte, n, min, max, maxAbsErr int64) ([]byte, error)` /  
+  `DecodeIntLossy(b []byte, min, max, maxAbsErr int64) (int64, int, error)`  
+  Encode/decode integers in `[min,max]` while allowing a bounded absolute error `maxAbsErr`.
+
 Bit-selection helpers:
 
 - `BitsForMaxRelError(maxRelErr float64) (int, error)`  
@@ -153,6 +159,14 @@ bitsForIntErr, err := varfloat.BitsForIntMaxError(0, 10_000, 5)
 if err != nil {
     // handle error
 }
+
+// With BitsForIntMaxError under the hood, EncodeIntLossy/DecodeIntLossy provide
+// a convenient pair for lossy integer storage:
+buf, err := varfloat.EncodeIntLossy(nil, 1234, 0, 10_000, 5)
+if err != nil {
+    // handle error
+}
+lossyVal, _, err := varfloat.DecodeIntLossy(buf, 0, 10_000, 5)
 ```
 
 Using configs and concurrency

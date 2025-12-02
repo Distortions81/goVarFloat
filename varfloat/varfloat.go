@@ -355,6 +355,40 @@ func ConsumeIntAuto(b []byte, min, max int64) (int64, int, error) {
 	return ConsumeIntBounded(b, min, max, bits)
 }
 
+// EncodeIntLossy encodes an integer n in [min, max] allowing a bounded
+// absolute error maxAbsErr when it is decoded via DecodeIntLossy.
+//
+// It chooses a mantissa precision using BitsForIntMaxError and then delegates
+// to AppendIntBounded. Use this when you explicitly want lossy integer storage
+// with a controlled maximum absolute error.
+func EncodeIntLossy(dst []byte, n, min, max, maxAbsErr int64) ([]byte, error) {
+	if min > max {
+		return nil, errors.New("varfloat: min must be <= max")
+	}
+	if n < min || n > max {
+		return nil, errors.New("varfloat: value out of bounds")
+	}
+	bits, err := BitsForIntMaxError(min, max, maxAbsErr)
+	if err != nil {
+		return nil, err
+	}
+	return AppendIntBounded(dst, n, min, max, bits)
+}
+
+// DecodeIntLossy decodes an integer that was encoded with EncodeIntLossy,
+// using the same bounds and maxAbsErr. It recomputes the mantissa precision
+// with BitsForIntMaxError and delegates to ConsumeIntBounded.
+func DecodeIntLossy(b []byte, min, max, maxAbsErr int64) (int64, int, error) {
+	if min > max {
+		return 0, 0, errors.New("varfloat: min must be <= max")
+	}
+	bits, err := BitsForIntMaxError(min, max, maxAbsErr)
+	if err != nil {
+		return 0, 0, err
+	}
+	return ConsumeIntBounded(b, min, max, bits)
+}
+
 // autoBitsForWidth chooses a mantissa bit count for a given integer width.
 // width is assumed to be >= 0.
 func autoBitsForWidth(width uint64) int {

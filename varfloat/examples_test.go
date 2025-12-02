@@ -136,4 +136,3 @@ func Example_deltas() {
 	fmt.Printf("  varfloat bytes:   %d\n", len(buf))
 	fmt.Printf("  compression:      %.2fx smaller\n", float64(fixedBytes)/float64(len(buf)))
 }
-
