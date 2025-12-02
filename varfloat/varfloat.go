@@ -132,13 +132,13 @@ func (c Config) Consume(b []byte) (float64, int, error) {
 	// Decode header.
 	header, n := binary.Uvarint(b)
 	if n <= 0 {
-		return 0, 0, errors.New("varfloat: invalid header uvarint")
+		return 0, 0, errors.New("varfloat: invalid header")
 	}
 
 	sign := int(header & 1)
 	ezPlus1 := header >> 1
 	if ezPlus1 == 0 {
-		return 0, 0, errors.New("varfloat: invalid header (zero ezPlus1)")
+		return 0, 0, errors.New("varfloat: invalid header")
 	}
 	ez := ezPlus1 - 1
 
@@ -147,7 +147,7 @@ func (c Config) Consume(b []byte) (float64, int, error) {
 	// Decode mantissa.
 	mant, mlen := binary.Uvarint(b[n:])
 	if mlen <= 0 {
-		return 0, 0, errors.New("varfloat: invalid mantissa uvarint")
+		return 0, 0, errors.New("varfloat: invalid mantissa")
 	}
 
 	// Reconstruct mantissa m' in [1, 2).
@@ -206,6 +206,9 @@ func DecodeFloat(b []byte, bits int) (float64, int, error) {
 // EncodeFloatSlice encodes a slice of float64 values with the given mantissa
 // precision (bits) into a single buffer. It prefixes the data with the length
 // of the slice encoded as a uvarint.
+//
+// Prefer EncodeFloats for a slightly nicer name; this function is kept for
+// explicitness and symmetry with DecodeFloatSlice.
 func EncodeFloatSlice(values []float64, bits int) ([]byte, error) {
 	cfg, err := NewConfig(bits)
 	if err != nil {
@@ -226,6 +229,9 @@ func EncodeFloatSlice(values []float64, bits int) ([]byte, error) {
 
 // DecodeFloatSlice decodes a slice of float64 values encoded by EncodeFloatSlice
 // using the given mantissa precision (bits).
+//
+// Prefer DecodeFloats for a slightly nicer name; this function is kept for
+// explicitness and symmetry with EncodeFloatSlice.
 func DecodeFloatSlice(b []byte, bits int) ([]float64, int, error) {
 	cfg, err := NewConfig(bits)
 	if err != nil {
@@ -235,7 +241,7 @@ func DecodeFloatSlice(b []byte, bits int) ([]float64, int, error) {
 	// Read length.
 	length, n := binary.Uvarint(b)
 	if n <= 0 {
-		return nil, 0, errors.New("varfloat: invalid slice length uvarint")
+		return nil, 0, errors.New("varfloat: invalid slice length")
 	}
 	b = b[n:]
 	consumed := n
@@ -254,12 +260,14 @@ func DecodeFloatSlice(b []byte, bits int) ([]float64, int, error) {
 	return values, consumed, nil
 }
 
-// EncodeFloats is a convenience alias for EncodeFloatSlice.
+// EncodeFloats is the preferred slice helper for most callers.
+// It is a convenience alias for EncodeFloatSlice.
 func EncodeFloats(values []float64, bits int) ([]byte, error) {
 	return EncodeFloatSlice(values, bits)
 }
 
-// DecodeFloats is a convenience alias for DecodeFloatSlice.
+// DecodeFloats is the preferred slice helper for most callers.
+// It is a convenience alias for DecodeFloatSlice.
 func DecodeFloats(b []byte, bits int) ([]float64, int, error) {
 	return DecodeFloatSlice(b, bits)
 }

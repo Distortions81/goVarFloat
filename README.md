@@ -5,6 +5,63 @@ GoVarFloat is a tiny Go library that implements a variable‑length encoding for
 
 The core type is just the standard `float64`; the library only defines functions for encoding/decoding to/from byte slices.
 
+Import path and versioning
+--------------------------
+
+- Module path: `github.com/Distortions81/goVarFloat`
+- Releases are tagged with semantic versions like `v0.1.0`, `v0.2.0`, `v1.0.0`, etc.
+- In your `go.mod`, you can depend on it with:
+
+  ```go
+  require github.com/Distortions81/goVarFloat v0.1.0
+  ```
+
+API overview
+------------
+
+Core float APIs:
+
+- `Append(dst []byte, v float64) []byte` / `Consume(b []byte) (float64, int, error)`  
+  Encode/decode a single `float64` using the global `DefaultConfig`.
+- `EncodeFloat(v float64, bits int) ([]byte, error)` / `DecodeFloat(b []byte, bits int) (float64, int, error)`  
+  Encode/decode a single float with an explicit mantissa bit count (no global mutation).
+- `EncodeFloats(values []float64, bits int) ([]byte, error)` / `DecodeFloats(b []byte, bits int) ([]float64, int, error)`  
+  Encode/decode a slice of floats with a length prefix.
+
+Core integer APIs:
+
+- `AppendIntBounded(dst []byte, n, min, max int64, bits int) ([]byte, error)` /  
+  `ConsumeIntBounded(b []byte, min, max int64, bits int) (int64, int, error)`  
+  Encode/decode integers known to lie in `[min,max]` with an explicit mantissa bit count.
+- `AppendIntAuto(dst []byte, n, min, max int64) ([]byte, error)` /  
+  `ConsumeIntAuto(b []byte, min, max int64) (int64, int, error)`  
+  Same as above, but the mantissa bits are chosen automatically from the bounds.
+
+Bit-selection helpers:
+
+- `BitsForMaxRelError(maxRelErr float64) (int, error)`  
+  Choose mantissa bits from a target maximum relative error.
+- `BitsForIntRange(min, max int64) (int, error)`  
+  Choose mantissa bits that distinguish all ints in `[min,max]` (used by `AppendIntAuto`).
+- `BitsForIntMaxError(min, max, maxAbsErr int64) (int, error)`  
+  Choose mantissa bits for lossy int→float→int with a max absolute error.
+
+Configs and concurrency:
+
+- `type Config struct { MantissaBits int }`  
+  Per-instance configuration for encoding/decoding (safe for concurrent use when you don’t mutate it).
+- `NewConfig(bits int) (Config, error)`  
+  Construct a `Config` with a validated bit count.
+- `DefaultConfig` and `SetMantissaBits(bits int) error`  
+  Global configuration used by `Append`/`Consume` (simple, but not safe to mutate concurrently).
+
+Fixed-size helpers (comparison/reference):
+
+- `EncodeFloat64Fixed` / `DecodeFloat64Fixed` – 8-byte IEEE 754 `float64` (big-endian).
+- `EncodeFloat32Fixed` / `DecodeFloat32Fixed` – 4-byte IEEE 754 `float32` (big-endian).
+- `EncodeInt64Fixed` / `DecodeInt64Fixed` – 8-byte big-endian signed int.
+- `EncodeInt32Fixed` / `DecodeInt32Fixed` – 4-byte big-endian signed int.
+
 Float varfloat encode/decode
 ----------------------------
 
@@ -22,6 +79,19 @@ if err != nil {
 }
 _ = v   // decoded value
 _ = n   // bytes consumed
+```
+
+If you already have a `Config`, prefer the methods on it instead of the package-level helpers:
+
+```go
+cfg, err := varfloat.NewConfig(12)
+if err != nil {
+    // handle error
+}
+
+var buf []byte
+buf = cfg.Append(buf, 3.14159)
+v, _, err := cfg.Consume(buf)
 ```
 
 If you prefer an all‑in‑one helper that takes the mantissa bit precision explicitly, you can use `EncodeFloat` / `DecodeFloat`:
@@ -198,7 +268,8 @@ i32Bytes := varfloat.EncodeInt32Fixed(12345)
 i32, _, err := varfloat.DecodeInt32Fixed(i32Bytes)
 
 // Slice encode/decode with a length prefix.
-// EncodeFloats/DecodeFloats are aliases for EncodeFloatSlice/DecodeFloatSlice.
+// EncodeFloats/DecodeFloats are the preferred helpers
+// (aliases for EncodeFloatSlice/DecodeFloatSlice).
 vals := []float64{0, 1, 3.14159}
 sliceBytes, err := varfloat.EncodeFloats(vals, 10)
 if err != nil {
@@ -234,65 +305,7 @@ You can:
 - Store coordinates as millimeters in `int32` (`[-1_000_000, 1_000_000]`).
 - Encode them with `AppendIntBounded` for each axis.
 
-```go
-package main
-
-import (
-    "fmt"
-    "math/rand"
-
-    "github.com/Distortions81/goVarFloat/varfloat"
-)
-
-type Vec3 struct{ X, Y, Z int32 } // millimeters
-
-func main() {
-    // Generate sparse positions: 90% at origin, 10% random in [-1000,1000] mm.
-    positions := make([]Vec3, 0, 10000)
-    for i := 0; i < cap(positions); i++ {
-        if rand.Float64() < 0.9 {
-            positions = append(positions, Vec3{0, 0, 0})
-        } else {
-            positions = append(positions, Vec3{
-                X: int32(rand.Intn(2001) - 1000),
-                Y: int32(rand.Intn(2001) - 1000),
-                Z: int32(rand.Intn(2001) - 1000),
-            })
-        }
-    }
-
-    // Baseline: fixed-size encoding (3 * int32).
-    fixedBytes := 0
-    for range positions {
-        fixedBytes += 3 * 4 // 3 axes * 4 bytes each
-    }
-
-    // Varfloat encoding with bounded ints and 10 mantissa bits.
-    const bits = 10
-    const min, max = int64(-1_000_000), int64(1_000_000)
-
-    var vfBuf []byte
-    for _, p := range positions {
-        var err error
-        vfBuf, err = varfloat.AppendIntBounded(vfBuf, int64(p.X), min, max, bits)
-        if err != nil {
-            panic(err)
-        }
-        vfBuf, err = varfloat.AppendIntBounded(vfBuf, int64(p.Y), min, max, bits)
-        if err != nil {
-            panic(err)
-        }
-        vfBuf, err = varfloat.AppendIntBounded(vfBuf, int64(p.Z), min, max, bits)
-        if err != nil {
-            panic(err)
-        }
-    }
-
-    fmt.Printf("fixed-size bytes: %d\n", fixedBytes)
-    fmt.Printf("varfloat bytes:   %d\n", len(vfBuf))
-    fmt.Printf("compression:      %.1fx smaller\n", float64(fixedBytes)/float64(len(vfBuf)))
-}
-```
+A complete, runnable example is in `varfloat/examples_test.go` as `Example_sparseCoords`.
 
 Because:
 
@@ -318,29 +331,7 @@ Suppose you have a large array of percentages in `[0,1]` and you’re fine with 
 - Baseline: `float64` → 8 bytes per value.
 - Varfloat: map to `[0, 10_000]` as ints with 0.01% steps, then use bounded int encodings.
 
-```go
-min, max := int64(0), int64(10_000) // 0.00%..100.00%
-bits := 10                          // ~0.1%-ish relative precision
-
-encodePercent := func(p float64) ([]byte, error) {
-    if p < 0 {
-        p = 0
-    } else if p > 1 {
-        p = 1
-    }
-    // store as 0..10000
-    n := int64(math.Round(p * 10_000))
-    return varfloat.AppendIntBounded(nil, n, min, max, bits)
-}
-
-decodePercent := func(b []byte) (float64, int, error) {
-    n, used, err := varfloat.ConsumeIntBounded(b, min, max, bits)
-    if err != nil {
-        return 0, 0, err
-    }
-    return float64(n) / 10_000.0, used, nil
-}
-```
+The full code for the percentage example lives in `varfloat/examples_test.go` as `Example_percentages`.
 
 In practice, many realistic percentages cluster near a few values (0, 1, small probabilities), yielding very short encodings compared to fixed 8-byte floats.
 
@@ -361,35 +352,7 @@ For many signals (e.g. sensor readings, audio levels, metrics), the absolute val
 - Baseline: store each sample as `float64` or `int64`.
 - Varfloat: store the first sample as fixed-size, then encode deltas with `AppendIntBounded` in a small symmetric range.
 
-```go
-// Example: int64 samples with small step-to-step changes
-samples := []int64{/* ... streaming data ... */}
-
-const (
-    bits     = 8
-    deltaMin = -1000
-    deltaMax = 1000
-)
-
-// Encode: first value fixed, then varfloat deltas.
-var buf []byte
-buf = append(buf, varfloat.EncodeInt64Fixed(samples[0])...)
-prev := samples[0]
-for _, s := range samples[1:] {
-    delta := s - prev
-    if delta < deltaMin {
-        delta = deltaMin
-    } else if delta > deltaMax {
-        delta = deltaMax
-    }
-    var err error
-    buf, err = varfloat.AppendIntBounded(buf, delta, deltaMin, deltaMax, bits)
-    if err != nil {
-        panic(err)
-    }
-    prev = s
-}
-```
+The full code for the time-series delta example is in `varfloat/examples_test.go` as `Example_deltas`.
 
 If most deltas are small (e.g. within [-10,10]), the varfloat encoding will mostly use 1–2 bytes per delta instead of 8 bytes per `int64`.
 
