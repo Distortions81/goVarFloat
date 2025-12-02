@@ -1,5 +1,19 @@
 GoVarFloat
 ==========
+Demo program
+------------
+
+- To see a richer, README-style walkthrough of the main use cases and results, run:
+  - `go run ./cmd/demo`
+- The demo prints several small, realistic scenarios and their space savings compared to fixed-size floats/ints, for example:
+  - Sparse pixel coordinates where only block-level precision (e.g. ~8px) is needed, using varfloats instead of full `float64`s, including a few example block-quantized positions.
+  - Percentages/probabilities in `[0,1]` with many exact zeros, going from ~80kB of fixed `float64`s down to ~15kB using either varints or varfloats (~5× smaller).
+  - Time-series integer deltas where step-to-step changes are small, going from ~80kB of fixed `int64`s down to ~10kB with varints and ~21kB with varfloats.
+  - Lossy integer buckets using pure integer math for quantization (e.g. counts rounded to 10-sized buckets) encoded as bounded ints via varfloats.
+  - 3D vectors stored with limited mantissa precision, trading a small relative error in vector length for ~2–3× smaller encodings.
+
+Overview
+--------
 
 GoVarFloat is a tiny Go library that implements a variable‑length encoding for `float64` values. It lets you trade precision for size by tuning the number of mantissa bits, and also provides helpers for encoding bounded integers via the same mechanism.
 

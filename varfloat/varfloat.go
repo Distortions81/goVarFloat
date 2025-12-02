@@ -111,6 +111,66 @@ func (c Config) Append(dst []byte, v float64) []byte {
 	return dst
 }
 
+// Vec3 represents a simple 3D vector stored as three float64 components.
+type Vec3 struct {
+	X, Y, Z float64
+}
+
+// EncodeVec3 encodes a single 3D vector using the given mantissa bit
+// precision. It is a small convenience wrapper around EncodeFloats.
+func EncodeVec3(v Vec3, bits int) ([]byte, error) {
+	return EncodeFloats([]float64{v.X, v.Y, v.Z}, bits)
+}
+
+// DecodeVec3 decodes a single 3D vector that was encoded with EncodeVec3
+// and the same mantissa bit precision.
+func DecodeVec3(b []byte, bits int) (Vec3, int, error) {
+	values, n, err := DecodeFloats(b, bits)
+	if err != nil {
+		return Vec3{}, 0, err
+	}
+	if len(values) != 3 {
+		return Vec3{}, 0, errors.New("varfloat: expected 3 components for Vec3")
+	}
+	return Vec3{X: values[0], Y: values[1], Z: values[2]}, n, nil
+}
+
+// EncodeVec3Slice encodes a slice of 3D vectors with a length prefix,
+// similar to EncodeFloats but grouping values into triples.
+func EncodeVec3Slice(vs []Vec3, bits int) ([]byte, error) {
+	if len(vs) == 0 {
+		return EncodeFloats(nil, bits)
+	}
+	flat := make([]float64, 0, len(vs)*3)
+	for _, v := range vs {
+		flat = append(flat, v.X, v.Y, v.Z)
+	}
+	return EncodeFloats(flat, bits)
+}
+
+// DecodeVec3Slice decodes a slice of 3D vectors that was encoded with
+// EncodeVec3Slice and the same mantissa bit precision.
+func DecodeVec3Slice(b []byte, bits int) ([]Vec3, int, error) {
+	flat, n, err := DecodeFloats(b, bits)
+	if err != nil {
+		return nil, 0, err
+	}
+	if len(flat)%3 != 0 {
+		return nil, 0, errors.New("varfloat: Vec3 slice encoding length is not a multiple of 3")
+	}
+	count := len(flat) / 3
+	out := make([]Vec3, 0, count)
+	for i := 0; i < count; i++ {
+		base := i * 3
+		out = append(out, Vec3{
+			X: flat[base],
+			Y: flat[base+1],
+			Z: flat[base+2],
+		})
+	}
+	return out, n, nil
+}
+
 // Consume decodes a varfloat from the beginning of b using DefaultConfig.
 // It returns the decoded value, the number of bytes consumed, and an error.
 func Consume(b []byte) (float64, int, error) {
