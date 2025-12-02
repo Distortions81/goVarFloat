@@ -7,28 +7,35 @@ import (
 	"math"
 )
 
-// mantBits controls the number of bits used to quantize the mantissa.
-// It can be tuned via SetMantissaBits. The default is 10 bits
-// (≈0.1% relative precision).
-var mantBits = 10
+// Config controls how varfloats are encoded and decoded.
+// MantissaBits is the number of bits used to quantize the mantissa.
+type Config struct {
+	MantissaBits int
+}
 
-// mantMax is derived from mantBits. It is updated whenever mantBits changes.
-var mantMax = (1 << mantBits) - 1
+// DefaultConfig is used by the package-level helpers (Append, Consume, etc).
+// Changing it is not safe for concurrent use; for concurrent code, prefer
+// creating your own Config value and using its methods.
+var DefaultConfig = Config{MantissaBits: 10}
 
-// SetMantissaBits configures the number of bits used to quantize the mantissa.
-// bits must be in [0, 52] (float64 has a 52-bit mantissa). Changing this
-// affects both encoding and decoding; all values encoded with one setting
-// must be decoded with the same setting.
-func SetMantissaBits(bits int) error {
+// NewConfig creates a Config with the given mantissa bit count.
+// bits must be in [0, 52] (float64 has a 52-bit mantissa).
+func NewConfig(bits int) (Config, error) {
 	if bits < 0 || bits > 52 {
-		return errors.New("varfloat: mantissa bits must be between 0 and 52")
+		return Config{}, errors.New("varfloat: mantissa bits must be between 0 and 52")
 	}
-	mantBits = bits
-	if bits == 0 {
-		mantMax = 0
-	} else {
-		mantMax = (1 << mantBits) - 1
+	return Config{MantissaBits: bits}, nil
+}
+
+// SetMantissaBits configures the mantissa bits on DefaultConfig.
+// This is a convenience for simple, non-concurrent use. For concurrent code,
+// prefer using an explicit Config instead of mutating global state.
+func SetMantissaBits(bits int) error {
+	cfg, err := NewConfig(bits)
+	if err != nil {
+		return err
 	}
+	DefaultConfig = cfg
 	return nil
 }
 
@@ -53,9 +60,15 @@ func BitsForMaxRelError(maxRelErr float64) (int, error) {
 	return bits, nil
 }
 
-// Append encodes v as a varfloat and appends it to dst.
+// Append encodes v as a varfloat using DefaultConfig and appends it to dst.
 // It returns the extended slice.
 func Append(dst []byte, v float64) []byte {
+	return DefaultConfig.Append(dst, v)
+}
+
+// Append encodes v as a varfloat with the receiver configuration and appends it to dst.
+// It returns the extended slice.
+func (c Config) Append(dst []byte, v float64) []byte {
 	// Special case zero: single-byte encoding 0x00
 	if v == 0 {
 		return append(dst, 0)
@@ -71,8 +84,9 @@ func Append(dst []byte, v float64) []byte {
 	m *= 2
 	e -= 1 // now v = (m/2) * 2^e', with 1 <= m < 2
 
-	// Quantize mantissa in [1, 2) to mantBits.
+	// Quantize mantissa in [1, 2) to c.MantissaBits.
 	var mant uint64
+	mantMax := mantMaxForBits(c.MantissaBits)
 	if mantMax > 0 {
 		mant = uint64(math.Round((m - 1.0) * float64(mantMax)))
 	}
@@ -97,9 +111,15 @@ func Append(dst []byte, v float64) []byte {
 	return dst
 }
 
-// Consume decodes a varfloat from the beginning of b.
+// Consume decodes a varfloat from the beginning of b using DefaultConfig.
 // It returns the decoded value, the number of bytes consumed, and an error.
 func Consume(b []byte) (float64, int, error) {
+	return DefaultConfig.Consume(b)
+}
+
+// Consume decodes a varfloat from the beginning of b using the receiver configuration.
+// It returns the decoded value, the number of bytes consumed, and an error.
+func (c Config) Consume(b []byte) (float64, int, error) {
 	if len(b) == 0 {
 		return 0, 0, io.ErrUnexpectedEOF
 	}
@@ -132,6 +152,7 @@ func Consume(b []byte) (float64, int, error) {
 
 	// Reconstruct mantissa m' in [1, 2).
 	mPrime := 1.0
+	mantMax := mantMaxForBits(c.MantissaBits)
 	if mantMax > 0 {
 		mPrime = 1.0 + float64(mant)/float64(mantMax)
 	}
@@ -148,65 +169,48 @@ func Consume(b []byte) (float64, int, error) {
 	return v, n + mlen, nil
 }
 
+// mantMaxForBits returns (1<<bits)-1, or 0 if bits <= 0.
+func mantMaxForBits(bits int) int {
+	if bits <= 0 {
+		return 0
+	}
+	if bits >= 63 {
+		// Avoid undefined behavior from shifting into sign bit of int.
+		bits = 63
+	}
+	return (1 << bits) - 1
+}
+
 // EncodeFloat encodes v into a fresh buffer using the given mantissa precision (bits).
 // It is a convenience wrapper around SetMantissaBits + Append.
 func EncodeFloat(v float64, bits int) ([]byte, error) {
-	// Save current mantissa configuration.
-	prevBits := mantBits
-	if err := SetMantissaBits(bits); err != nil {
+	cfg, err := NewConfig(bits)
+	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		mantBits = prevBits
-		if prevBits == 0 {
-			mantMax = 0
-		} else {
-			mantMax = (1 << prevBits) - 1
-		}
-	}()
-
 	var buf []byte
-	buf = Append(buf, v)
+	buf = cfg.Append(buf, v)
 	return buf, nil
 }
 
 // DecodeFloat decodes a varfloat-encoded value from b using the given mantissa precision (bits).
 // The same bits must have been used for encoding.
 func DecodeFloat(b []byte, bits int) (float64, int, error) {
-	// Save current mantissa configuration.
-	prevBits := mantBits
-	if err := SetMantissaBits(bits); err != nil {
+	cfg, err := NewConfig(bits)
+	if err != nil {
 		return 0, 0, err
 	}
-	defer func() {
-		mantBits = prevBits
-		if prevBits == 0 {
-			mantMax = 0
-		} else {
-			mantMax = (1 << prevBits) - 1
-		}
-	}()
-
-	return Consume(b)
+	return cfg.Consume(b)
 }
 
 // EncodeFloatSlice encodes a slice of float64 values with the given mantissa
 // precision (bits) into a single buffer. It prefixes the data with the length
 // of the slice encoded as a uvarint.
 func EncodeFloatSlice(values []float64, bits int) ([]byte, error) {
-	// Save current mantissa configuration.
-	prevBits := mantBits
-	if err := SetMantissaBits(bits); err != nil {
+	cfg, err := NewConfig(bits)
+	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		mantBits = prevBits
-		if prevBits == 0 {
-			mantMax = 0
-		} else {
-			mantMax = (1 << prevBits) - 1
-		}
-	}()
 
 	var buf []byte
 	// Prefix length.
@@ -215,7 +219,7 @@ func EncodeFloatSlice(values []float64, bits int) ([]byte, error) {
 	buf = append(buf, lenBuf[:n]...)
 
 	for _, v := range values {
-		buf = Append(buf, v)
+		buf = cfg.Append(buf, v)
 	}
 	return buf, nil
 }
@@ -223,19 +227,10 @@ func EncodeFloatSlice(values []float64, bits int) ([]byte, error) {
 // DecodeFloatSlice decodes a slice of float64 values encoded by EncodeFloatSlice
 // using the given mantissa precision (bits).
 func DecodeFloatSlice(b []byte, bits int) ([]float64, int, error) {
-	// Save current mantissa configuration.
-	prevBits := mantBits
-	if err := SetMantissaBits(bits); err != nil {
+	cfg, err := NewConfig(bits)
+	if err != nil {
 		return nil, 0, err
 	}
-	defer func() {
-		mantBits = prevBits
-		if prevBits == 0 {
-			mantMax = 0
-		} else {
-			mantMax = (1 << prevBits) - 1
-		}
-	}()
 
 	// Read length.
 	length, n := binary.Uvarint(b)
@@ -247,7 +242,7 @@ func DecodeFloatSlice(b []byte, bits int) ([]float64, int, error) {
 
 	values := make([]float64, 0, length)
 	for i := uint64(0); i < length; i++ {
-		v, used, err := Consume(b)
+		v, used, err := cfg.Consume(b)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -257,6 +252,16 @@ func DecodeFloatSlice(b []byte, bits int) ([]float64, int, error) {
 	}
 
 	return values, consumed, nil
+}
+
+// EncodeFloats is a convenience alias for EncodeFloatSlice.
+func EncodeFloats(values []float64, bits int) ([]byte, error) {
+	return EncodeFloatSlice(values, bits)
+}
+
+// DecodeFloats is a convenience alias for DecodeFloatSlice.
+func DecodeFloats(b []byte, bits int) ([]float64, int, error) {
+	return DecodeFloatSlice(b, bits)
 }
 
 // AppendIntBounded encodes an integer n that is known to lie in [min, max]
@@ -272,24 +277,14 @@ func AppendIntBounded(dst []byte, n, min, max int64, bits int) ([]byte, error) {
 		return nil, errors.New("varfloat: value out of bounds")
 	}
 
-	// Save current mantissa configuration.
-	prevBits := mantBits
-	if err := SetMantissaBits(bits); err != nil {
+	cfg, err := NewConfig(bits)
+	if err != nil {
 		return nil, err
 	}
-	// Restore previous mantissa configuration after encoding.
-	defer func() {
-		mantBits = prevBits
-		if prevBits == 0 {
-			mantMax = 0
-		} else {
-			mantMax = (1 << prevBits) - 1
-		}
-	}()
 
 	// Map integer to float64 in the same numeric space.
 	v := float64(n)
-	return Append(dst, v), nil
+	return cfg.Append(dst, v), nil
 }
 
 // ConsumeIntBounded decodes a varfloat produced by AppendIntBounded back into
@@ -302,22 +297,12 @@ func ConsumeIntBounded(b []byte, min, max int64, bits int) (int64, int, error) {
 		return 0, 0, errors.New("varfloat: min must be <= max")
 	}
 
-	// Save current mantissa configuration.
-	prevBits := mantBits
-	if err := SetMantissaBits(bits); err != nil {
+	cfg, err := NewConfig(bits)
+	if err != nil {
 		return 0, 0, err
 	}
-	// Restore previous mantissa configuration after decoding.
-	defer func() {
-		mantBits = prevBits
-		if prevBits == 0 {
-			mantMax = 0
-		} else {
-			mantMax = (1 << prevBits) - 1
-		}
-	}()
 
-	v, n, err := Consume(b)
+	v, n, err := cfg.Consume(b)
 	if err != nil {
 		return 0, 0, err
 	}

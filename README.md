@@ -84,6 +84,70 @@ if err != nil {
     // handle error
 }
 ```
+
+Using configs and concurrency
+-----------------------------
+
+The package exposes both:
+
+- Package-level helpers (`Append`, `Consume`, `EncodeFloat`, etc.) that use a global `DefaultConfig`.
+- A `Config` type that you can use directly for clearer, concurrency-safe code.
+
+For simple, single-threaded usage, the package-level functions are fine:
+
+```go
+// Uses DefaultConfig.MantissaBits (10 by default).
+buf := varfloat.Append(nil, 3.14159)
+v, _, err := varfloat.Consume(buf)
+```
+
+To adjust the global default mantissa bits, you can call:
+
+```go
+// Not safe to change concurrently with other uses of the package-level helpers.
+if err := varfloat.SetMantissaBits(16); err != nil {
+    // handle error
+}
+```
+
+For concurrent code, or when you want explicit control, prefer creating your own `Config`:
+
+```go
+// Create a config with 12 mantissa bits.
+cfg, err := varfloat.NewConfig(12)
+if err != nil {
+    // handle error
+}
+
+// Use cfg.Append / cfg.Consume instead of the globals.
+var buf []byte
+buf = cfg.Append(buf, 42.0)
+val, _, err := cfg.Consume(buf)
+if err != nil {
+    // handle error
+}
+```
+
+You can keep a `Config` per goroutine or per data stream to avoid any global mutable state while still reusing the same encoding logic. The integer and slice helpers (`EncodeFloats`, `AppendIntBounded`, `AppendIntAuto`, etc.) already use per-call `Config` values internally, so they’re safe to call concurrently. 
+
+Choosing bits and “auto bits”
+-----------------------------
+
+There are three ways to pick how many mantissa bits to use, depending on what you care about:
+
+- **Target relative error (floats):**  
+  Use `BitsForMaxRelError(maxRelErr)` when you care about relative precision, e.g. “keep the error < 0.1%”.
+  - This is typically what you want for general `float64` values.
+
+- **Lossless over a bounded int range:**  
+  Use `BitsForIntRange(min, max)` when you want to be able to distinguish *every* integer in `[min,max]` with the bounded-int helpers.
+  - `BitsForIntRange` is also what `AppendIntAuto` / `ConsumeIntAuto` use internally:
+    - `AppendIntAuto(dst, n, min, max)` picks bits from `[min,max]` so the encoding is effectively lossless over that range.
+    - `ConsumeIntAuto(b, min, max)` recomputes the same bits from the bounds.
+
+- **Lossy int→float→int with max absolute error:**  
+  Use `BitsForIntMaxError(min, max, maxAbsErr)` when you’re okay with lossy integer storage but want to bound the absolute error, e.g. “I’m fine being ±5 off”.
+  - This is for cases where you intentionally accept lossy integer quantization to get even smaller encodings.
 ```
 
 Integer varfloat encode/decode
@@ -133,13 +197,14 @@ i64, _, err := varfloat.DecodeInt64Fixed(i64Bytes)
 i32Bytes := varfloat.EncodeInt32Fixed(12345)
 i32, _, err := varfloat.DecodeInt32Fixed(i32Bytes)
 
-// Slice encode/decode with a length prefix
+// Slice encode/decode with a length prefix.
+// EncodeFloats/DecodeFloats are aliases for EncodeFloatSlice/DecodeFloatSlice.
 vals := []float64{0, 1, 3.14159}
-sliceBytes, err := varfloat.EncodeFloatSlice(vals, 10)
+sliceBytes, err := varfloat.EncodeFloats(vals, 10)
 if err != nil {
     // handle error
 }
-decodedVals, _, err := varfloat.DecodeFloatSlice(sliceBytes, 10)
+decodedVals, _, err := varfloat.DecodeFloats(sliceBytes, 10)
 if err != nil {
     // handle error
 }
